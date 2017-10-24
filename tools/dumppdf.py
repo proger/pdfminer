@@ -20,9 +20,17 @@ ESC_PAT = re.compile(r'[\000-\037&<>()"\042\047\134\177-\377]')
 def e(s):
     return ESC_PAT.sub(lambda m:'&#%d;' % ord(m.group(0)), s)
 
+def isimage(obj):
+    return getattr(obj.attrs.get('Subtype'), 'name', None) == 'Image'
+
+def dumpimage(obj, imagedir):
+    # jpeg probably? how do you check?
+    filename = '{}/{}.jpeg'.format(imagedir, obj.objid)
+    with open(filename, 'w') as f:
+        f.write(obj.get_data())
 
 # dumpxml
-def dumpxml(out, obj, codec=None):
+def dumpxml(out, obj, codec=None, imagedir=None):
     if obj is None:
         out.write('<null />')
         return
@@ -30,7 +38,7 @@ def dumpxml(out, obj, codec=None):
     if isinstance(obj, dict):
         out.write('<dict size="%d">\n' % len(obj))
         for (k,v) in obj.iteritems():
-            out.write('<key>%s</key>\n' % k)
+            out.write('<key>%s</key>\n' % k.encode('utf-8'))
             out.write('<value>')
             dumpxml(out, v)
             out.write('</value>\n')
@@ -53,6 +61,8 @@ def dumpxml(out, obj, codec=None):
         if codec == 'raw':
             out.write(obj.get_rawdata())
         elif codec == 'binary':
+            if imagedir is not None and isimage(obj):
+                dumpimage(obj, imagedir)
             out.write(obj.get_data())
         else:
             out.write('<stream>\n<props>\n')
@@ -83,15 +93,15 @@ def dumpxml(out, obj, codec=None):
     raise TypeError(obj)
 
 # dumptrailers
-def dumptrailers(out, doc):
+def dumptrailers(out, doc, imagedir=None):
     for xref in doc.xrefs:
         out.write('<trailer>\n')
-        dumpxml(out, xref.trailer)
+        dumpxml(out, xref.trailer, imagedir=imagedir)
         out.write('\n</trailer>\n\n')
     return
 
 # dumpallobjs
-def dumpallobjs(out, doc, codec=None):
+def dumpallobjs(out, doc, codec=None, imagedir=None):
     visited = set()
     out.write('<pdf>')
     for xref in doc.xrefs:
@@ -102,17 +112,17 @@ def dumpallobjs(out, doc, codec=None):
                 obj = doc.getobj(objid)
                 if obj is None: continue
                 out.write('<object id="%d">\n' % objid)
-                dumpxml(out, obj, codec=codec)
+                dumpxml(out, obj, codec=codec, imagedir=imagedir)
                 out.write('\n</object>\n\n')
             except PDFObjectNotFound as e:
                 print >>sys.stderr, 'not found: %r' % e
-    dumptrailers(out, doc)
+    dumptrailers(out, doc, imagedir=imagedir)
     out.write('</pdf>')
     return
 
 # dumpoutline
 def dumpoutline(outfp, fname, objids, pagenos, password='',
-                dumpall=False, codec=None, extractdir=None):
+                dumpall=False, codec=None, extractdir=None, imagedir=None):
     fp = file(fname, 'rb')
     parser = PDFParser(fp)
     doc = PDFDocument(parser, password)
@@ -145,7 +155,7 @@ def dumpoutline(outfp, fname, objids, pagenos, password='',
             outfp.write('<outline level="%r" title="%s">\n' % (level, s))
             if dest is not None:
                 outfp.write('<dest>')
-                dumpxml(outfp, dest)
+                dumpxml(outfp, dest, imagedir=imagedir)
                 outfp.write('</dest>\n')
             if pageno is not None:
                 outfp.write('<pageno>%r</pageno>\n' % pageno)
@@ -161,7 +171,7 @@ def dumpoutline(outfp, fname, objids, pagenos, password='',
 LITERAL_FILESPEC = LIT('Filespec')
 LITERAL_EMBEDDEDFILE = LIT('EmbeddedFile')
 def extractembedded(outfp, fname, objids, pagenos, password='',
-                    dumpall=False, codec=None, extractdir=None):
+                    dumpall=False, codec=None, extractdir=None, imagedir=None):
     def extract1(obj):
         filename = os.path.basename(obj['UF'] or obj['F'])
         fileref = obj['EF']['F']
@@ -195,27 +205,27 @@ def extractembedded(outfp, fname, objids, pagenos, password='',
 
 # dumppdf
 def dumppdf(outfp, fname, objids, pagenos, password='',
-            dumpall=False, codec=None, extractdir=None):
+            dumpall=False, codec=None, extractdir=None, imagedir=None):
     fp = file(fname, 'rb')
     parser = PDFParser(fp)
     doc = PDFDocument(parser, password)
     if objids:
         for objid in objids:
             obj = doc.getobj(objid)
-            dumpxml(outfp, obj, codec=codec)
+            dumpxml(outfp, obj, codec=codec, imagedir=imagedir)
     if pagenos:
         for (pageno,page) in enumerate(PDFPage.create_pages(doc)):
             if pageno in pagenos:
                 if codec:
                     for obj in page.contents:
                         obj = stream_value(obj)
-                        dumpxml(outfp, obj, codec=codec)
+                        dumpxml(outfp, obj, codec=codec, imagedir=imagedir)
                 else:
-                    dumpxml(outfp, page.attrs)
+                    dumpxml(outfp, page.attrs, imagedir=imagedir)
     if dumpall:
-        dumpallobjs(outfp, doc, codec=codec)
+        dumpallobjs(outfp, doc, codec=codec, imagedir=imagedir)
     if (not objids) and (not pagenos) and (not dumpall):
-        dumptrailers(outfp, doc)
+        dumptrailers(outfp, doc, imagedir=imagedir)
     fp.close()
     if codec not in ('raw','binary'):
         outfp.write('\n')
@@ -226,10 +236,10 @@ def dumppdf(outfp, fname, objids, pagenos, password='',
 def main(argv):
     import getopt
     def usage():
-        print ('usage: %s [-d] [-a] [-p pageid] [-P password] [-r|-b|-t] [-T] [-E directory] [-i objid] file ...' % argv[0])
+        print ('usage: %s [-d] [-a] [-p pageid] [-P password] [-r|-b|-t] [-T] [-E directory] [-i objid] [-I imagedir] file ...' % argv[0])
         return 100
     try:
-        (opts, args) = getopt.getopt(argv[1:], 'dap:P:rbtTE:i:')
+        (opts, args) = getopt.getopt(argv[1:], 'dap:P:rbtTE:i:I:')
     except getopt.GetoptError:
         return usage()
     if not args: return usage()
@@ -242,6 +252,7 @@ def main(argv):
     proc = dumppdf
     outfp = sys.stdout
     extractdir = None
+    imagedir = None
     for (k, v) in opts:
         if k == '-d': debug += 1
         elif k == '-o': outfp = file(v, 'wb')
@@ -253,6 +264,7 @@ def main(argv):
         elif k == '-b': codec = 'binary'
         elif k == '-t': codec = 'text'
         elif k == '-T': proc = dumpoutline
+        elif k == '-I': imagedir = v
         elif k == '-E':
             extractdir = v
             proc = extractembedded
@@ -262,7 +274,7 @@ def main(argv):
     #
     for fname in args:
         proc(outfp, fname, objids, pagenos, password=password,
-             dumpall=dumpall, codec=codec, extractdir=extractdir)
+             dumpall=dumpall, codec=codec, extractdir=extractdir, imagedir=imagedir)
     return
 
 if __name__ == '__main__': sys.exit(main(sys.argv))
